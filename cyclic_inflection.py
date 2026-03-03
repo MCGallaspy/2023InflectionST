@@ -9,7 +9,8 @@ import torch.nn.functional as F
 from datetime import datetime as dt
 from tqdm import tqdm
 
-SAMPLE_RATE = 0.0001
+SAMPLE_RATE = 0.1
+EARLY_STOP_THRESHOLD = 5
 
 train_df = pd.read_csv('part1/data/nav.trn', sep='\t', header=None, names=["root", "content", "form"])
 train_df = train_df.sample(frac=SAMPLE_RATE)
@@ -261,10 +262,6 @@ def decode_pred(pred):
          for (g, i) in onegram_vocab.items()
          if i == torch.argmax(seq).item()])
 
-
-dev_df = train_df
-test_df = train_df
-
 train_losses = []
 dev_losses = []
 
@@ -298,7 +295,6 @@ print("Dev losses:", dev_losses)
 
 best_dev, best_dev_idx = 9e99, -1
 cur_idx = 0
-EARLY_STOP_THRESHOLD = 1000
 
 while True:
     if cur_idx - best_dev_idx > EARLY_STOP_THRESHOLD:
@@ -332,8 +328,19 @@ while True:
         best_dev = dev_losses[-1]
         best_dev_idx = cur_idx
         print(f"Best iteration: {best_dev_idx}, dev loss = {best_dev}")
+        iso_time = dt.now().isoformat()
+        iso_time_fp = iso_time.replace(":", "_")
+        iso_time_fp = iso_time_fp.replace("-", "_")
+        PATH = f"cyclic_inflection_models.{iso_time_fp}.pt"
+        torch.save({
+                    'epoch': cur_idx,
+                    'dev_loss': best_dev,
+                    'date': iso_time,
+                    'form_model_state_dict': form_model.state_dict(),
+                    'content_model_state_dict': form_model.state_dict(),
+                    'optimizer_state_dict': optimizer.state_dict(),
+                    }, PATH)
     cur_idx += 1
-
 
 print("Training losses:", train_losses)
 print("Dev losses:", dev_losses)
@@ -350,7 +357,7 @@ with torch.no_grad():
     test_df.pred = test_df.pred.apply(decode_pred)
     accuracy = np.sum(test_df.pred == test_df.form) / test_df.shape[0]
     print(f"Test accuracy: {accuracy:.2%}")
-    test_df.loc[:, ['form', 'pred']].to_csv("dev_out.tsv", sep="\t")
+    test_df.loc[:, ['form', 'pred']].to_csv("test_out.tsv", sep="\t")
 
     train_df['pred'] = train_df.apply(lambda row: eval_inflection(form_model, row, train_df), axis=1)
     train_df.pred = train_df.pred.apply(decode_pred)
