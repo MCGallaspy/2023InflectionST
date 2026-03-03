@@ -10,7 +10,8 @@ from datetime import datetime as dt
 from tqdm import tqdm
 
 SAMPLE_RATE = 0.1
-EARLY_STOP_THRESHOLD = 5
+EARLY_STOP_THRESHOLD = 20
+FORCED_PRETRAIN_EPOCHS = 50
 
 train_df = pd.read_csv('part1/data/nav.trn', sep='\t', header=None, names=["root", "content", "form"])
 train_df = train_df.sample(frac=SAMPLE_RATE)
@@ -272,7 +273,7 @@ train_losses += train_step(
     content_model,
     train_df,
     num_examples=train_df.shape[0],
-    num_epochs=10,
+    num_epochs=FORCED_PRETRAIN_EPOCHS,
     forced=True,
 )
 
