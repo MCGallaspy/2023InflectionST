@@ -156,6 +156,7 @@ class ContentModel(torch.nn.Module):
 
     def __init__(self, d_input, num_labels):
         super().__init__()
+        self.num_labels = num_labels
         self.conv1 = torch.nn.Conv1d(
             in_channels=d_input,
             out_channels=256,
@@ -164,26 +165,38 @@ class ContentModel(torch.nn.Module):
         )
         self.conv2 = torch.nn.Conv1d(
             in_channels=256,
-            out_channels=256,
+            out_channels=2 * num_labels,
             kernel_size=3,
             padding='same',
         )
-        self.conv3 = torch.nn.Conv1d(
-            in_channels=256,
-            out_channels=2,
-            kernel_size=3,
-            padding='same',
+        self.transformer = nn.Transformer(
+            d_model=2 * num_labels,
+            nhead=2,
+            num_encoder_layers=1,
+            num_decoder_layers=1,
+            #dim_feedforward=64,
         )
-        self.avg_pooling = nn.AdaptiveAvgPool1d(num_labels)
         self.log_softmax = nn.LogSoftmax(dim=0)
+
+        max_len = 50
+        pos_encoding = torch.zeros(max_len, 2 * num_labels, requires_grad=False)
+        positions_list = torch.arange(0, max_len, dtype=torch.float).view(-1, 1)
+        division_term = torch.exp(torch.arange(0, 2 * num_labels, 2).float() * (-math.log(10000.0)) / 2 * num_labels)
+        pos_encoding[:, 0::2] = torch.sin(positions_list * division_term)
+        pos_encoding[:, 1::2] = torch.cos(positions_list * division_term)
+        self.register_buffer('pos_encoding', pos_encoding)
 
     def forward(self, X):
         X = torch.permute(X.unsqueeze(0), dims=(0, 2, 1)) # To N, C, L
         X = self.conv1(X)
         X = self.conv2(X)
-        X = self.conv3(X)
-        X = self.avg_pooling(X)
-        out = self.log_softmax(X)
+        X = torch.permute(X.squeeze(), dims=(1, 0)) # Back to L, C
+        X += self.pos_encoding[:X.shape[0], :X.shape[1]]
+        y = torch.zeros(1, 2 * self.num_labels)
+        transformer_out = self.transformer(X, y, tgt_mask=None, tgt_is_causal=False)
+        out = transformer_out.reshape(2, self.num_labels)
+        out = self.log_softmax(out)
+        out = out.unsqueeze(0)
         return out
 
 
@@ -293,7 +306,7 @@ def train_step(form_model, content_model, train_df, num_examples=1, num_epochs=1
     return losses
 
 
-def eval_inflection(form_model, row, eval_df):
+def eval_inflection(form_model, row):
     form_model.eval()
     root_form_sequence = get_form_sequence(row.root)
     maxlen = root_form_sequence.shape[0]
@@ -313,11 +326,38 @@ def eval_inflection(form_model, row, eval_df):
     return y
 
 
-def decode_pred(pred):
-     return ''.join([g
-         for seq in pred[1:-1]
-         for (g, i) in form_unigram_vocab.items()
-         if i == torch.argmax(seq).item()])
+def eval_content(content_model, row):
+    content_model.eval()
+    seqs = (get_form_sequence(row.root), row.form_sequence)
+    maxlen = max(s.shape[0] for s in seqs)
+    vs = []
+    for s in seqs:
+        while s.shape[0] < maxlen:
+            s = torch.cat((s, pad_vector), dim=0)
+        vs.append(s)
+    X = torch.cat(vs, dim=1)
+    expanded_content = get_content_tensor("ROOT").expand(maxlen, -1)
+    X = torch.cat([X, expanded_content], dim=1)
+    pred_content = content_model(X)
+    return pred_content
+
+
+def decode_form_pred(pred):
+    return ''.join([g
+        for seq in pred[1:-1]
+        for (g, i) in form_unigram_vocab.items()
+        if i == torch.argmax(seq).item()])
+
+
+def decode_content_pred(pred):
+    results = []
+    pred = pred.squeeze()
+    unigram_reversal = sorted((i, c) for (c, i) in content_unigram_vocab.items())
+    for is_present, (j, c) in zip(torch.argmax(pred, dim=0), unigram_reversal):
+        is_present = bool(is_present)
+        if is_present:
+            results.append(c)
+    return ';'.join(results)
 
 train_losses = []
 dev_losses = []
@@ -355,8 +395,7 @@ cur_idx = 0
 
 while True:
     if cur_idx - best_dev_idx > EARLY_STOP_THRESHOLD:
-        if all(x >= best_dev for x in dev_losses[-EARLY_STOP_THRESHOLD:]):
-            break
+        break
 
     form_model.train()
     content_model.train()
@@ -394,7 +433,7 @@ while True:
                     'dev_loss': best_dev,
                     'date': iso_time,
                     'form_model_state_dict': form_model.state_dict(),
-                    'content_model_state_dict': form_model.state_dict(),
+                    'content_model_state_dict': content_model.state_dict(),
                     'optimizer_state_dict': optimizer.state_dict(),
                     }, PATH)
     cur_idx += 1
@@ -404,23 +443,29 @@ print("Dev losses:", dev_losses)
 
 
 with torch.no_grad():
-    dev_df['pred'] = dev_df.apply(lambda row: eval_inflection(form_model, row, dev_df), axis=1)
-    dev_df.pred = dev_df.pred.apply(decode_pred)
+    dev_df['pred'] = dev_df.apply(lambda row: eval_inflection(form_model, row), axis=1)
+    dev_df.pred = dev_df.pred.apply(decode_form_pred)
+    dev_df['pred_content'] = dev_df.apply(lambda row: eval_content(content_model, row), axis=1)
+    dev_df.pred_content = dev_df.pred_content.apply(decode_content_pred)
     accuracy = np.sum(dev_df.pred == dev_df.form) / dev_df.shape[0]
     print(f"Dev accuracy: {accuracy:.2%}")
-    dev_df.loc[:, ['form', 'pred']].to_csv("dev_out.tsv", sep="\t")
+    dev_df.loc[:, ['form', 'content', 'pred', 'pred_content']].to_csv("dev_out.tsv", sep="\t")
 
-    test_df['pred'] = test_df.apply(lambda row: eval_inflection(form_model, row, test_df), axis=1)
-    test_df.pred = test_df.pred.apply(decode_pred)
+    test_df['pred'] = test_df.apply(lambda row: eval_inflection(form_model, row), axis=1)
+    test_df.pred = test_df.pred.apply(decode_form_pred)
+    test_df['pred_content'] = test_df.apply(lambda row: eval_content(content_model, row), axis=1)
+    test_df.pred_content = test_df.pred_content.apply(decode_content_pred)
     accuracy = np.sum(test_df.pred == test_df.form) / test_df.shape[0]
     print(f"Test accuracy: {accuracy:.2%}")
-    test_df.loc[:, ['form', 'pred']].to_csv("test_out.tsv", sep="\t")
+    test_df.loc[:, ['form', 'content', 'pred', 'pred_content']].to_csv("test_out.tsv", sep="\t")
 
-    train_df['pred'] = train_df.apply(lambda row: eval_inflection(form_model, row, train_df), axis=1)
-    train_df.pred = train_df.pred.apply(decode_pred)
+    train_df['pred'] = train_df.apply(lambda row: eval_inflection(form_model, row), axis=1)
+    train_df.pred = train_df.pred.apply(decode_form_pred)
+    train_df['pred_content'] = train_df.apply(lambda row: eval_content(content_model, row), axis=1)
+    train_df.pred_content = train_df.pred_content.apply(decode_content_pred)
     accuracy = np.sum(train_df.pred == train_df.form) / train_df.shape[0]
     print(f"Train accuracy: {accuracy:.2%}")
-    train_df.loc[:, ['form', 'pred']].to_csv("train_out.tsv", sep="\t")
+    train_df.loc[:, ['form', 'content', 'pred', 'pred_content']].to_csv("train_out.tsv", sep="\t")
 
 #iso_time = dt.now().isoformat()
 #iso_time_fp = iso_time.replace(":", "_")
