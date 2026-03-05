@@ -12,9 +12,10 @@ from tqdm import tqdm
 from torch.utils.tensorboard import SummaryWriter
 writer = SummaryWriter()
 
-SAMPLE_RATE = .01
-EARLY_STOP_THRESHOLD = 5
+SAMPLE_RATE = .001
+EARLY_STOP_THRESHOLD = 10
 FORCED_PRETRAIN_EPOCHS = 20
+GET_ACCURACY_EPOCHS = 5 # Get accuracies every THIS number of epochs
 
 train_df = pd.read_csv('part1/data/nav.trn', sep='\t', header=None, names=["root", "content", "form"])
 train_df = train_df.sample(frac=SAMPLE_RATE)
@@ -306,7 +307,7 @@ def train_step(form_model, content_model, train_df, num_examples=1, num_epochs=1
                 optimizer.zero_grad()
             pbar.update(1)
         losses.append(epoch_loss / num_examples)
-    return losses
+    return losses if num_epochs > 1 else losses[0]
 
 
 def eval_inflection(form_model, row):
@@ -362,12 +363,9 @@ def decode_content_pred(pred):
             results.append(c)
     return ';'.join(results)
 
-train_losses = []
-dev_losses = []
-
 form_model.train()
 content_model.train()
-train_losses += train_step(
+train_step(
     form_model,
     content_model,
     train_df,
@@ -376,12 +374,10 @@ train_losses += train_step(
     forced=True,
 )
 
-print("Trainining losses:", train_losses)
-
 form_model.eval()
 content_model.eval()
 with torch.no_grad():
-    dev_losses += train_step(
+    train_step(
         form_model,
         content_model,
         train_df,
@@ -390,7 +386,42 @@ with torch.no_grad():
         forced=True,
     )
 
-print("Dev losses:", dev_losses)
+def get_accuracies(epoch):
+    with torch.no_grad():
+        form_model.eval(), content_model.eval()
+        dev_df['pred'] = dev_df.apply(lambda row: eval_inflection(form_model, row), axis=1)
+        dev_df.pred = dev_df.pred.apply(decode_form_pred)
+        dev_df['pred_content'] = dev_df.apply(lambda row: eval_content(content_model, row), axis=1)
+        dev_df.pred_content = dev_df.pred_content.apply(decode_content_pred)
+        dev_accuracy = np.sum(dev_df.pred == dev_df.form) / dev_df.shape[0]
+        print(f"Dev accuracy: {dev_accuracy:.2%}")
+        dev_df.loc[:, ['form', 'content', 'pred', 'pred_content']].to_csv(f"dev_out.epoch{epoch}.tsv", sep="\t")
+
+        test_df['pred'] = test_df.apply(lambda row: eval_inflection(form_model, row), axis=1)
+        test_df.pred = test_df.pred.apply(decode_form_pred)
+        test_df['pred_content'] = test_df.apply(lambda row: eval_content(content_model, row), axis=1)
+        test_df.pred_content = test_df.pred_content.apply(decode_content_pred)
+        test_accuracy = np.sum(test_df.pred == test_df.form) / test_df.shape[0]
+        print(f"Test accuracy: {test_accuracy:.2%}")
+        test_df.loc[:, ['form', 'content', 'pred', 'pred_content']].to_csv(f"test_out.epoch{epoch}.tsv", sep="\t")
+
+        train_df['pred'] = train_df.apply(lambda row: eval_inflection(form_model, row), axis=1)
+        train_df.pred = train_df.pred.apply(decode_form_pred)
+        train_df['pred_content'] = train_df.apply(lambda row: eval_content(content_model, row), axis=1)
+        train_df.pred_content = train_df.pred_content.apply(decode_content_pred)
+        train_accuracy = np.sum(train_df.pred == train_df.form) / train_df.shape[0]
+        print(f"Train accuracy: {train_accuracy:.2%}")
+        train_df.loc[:, ['form', 'content', 'pred', 'pred_content']].to_csv(f"train_out.epoch{epoch}.tsv", sep="\t")
+    
+    return dev_accuracy, test_accuracy, train_accuracy
+
+
+def log_random_text_samples(df, epoch, tag):
+    num_text_samples = 5
+    num_text_samples = min(num_text_samples, df.shape[0])
+    for i, row in enumerate(df.sample(n=num_text_samples, random_state=42).itertuples()):
+        writer.add_text(f"Example form {i} (g.t. | pred)/{tag}", f"{row.form} | {row.pred}", epoch)
+        writer.add_text(f"Example content {i} (g.t. | pred)/{tag}", f"{row.content} | {row.pred_content}", epoch)
 
 
 best_dev, best_dev_idx = 9e99, -1
@@ -416,7 +447,7 @@ while True:
     form_model.eval()
     content_model.eval()
     with torch.no_grad():
-        dev_loss += train_step(
+        dev_loss = train_step(
             form_model,
             content_model,
             dev_df,
@@ -443,30 +474,14 @@ while True:
                     'content_model_state_dict': content_model.state_dict(),
                     'optimizer_state_dict': optimizer.state_dict(),
                     }, PATH)
+    
+    if (cur_idx + 1) % GET_ACCURACY_EPOCHS == 0:
+        dev_accuracy, test_accuracy, train_accuracy = get_accuracies(cur_idx)
+        writer.add_scalar("Accuracy/train", train_accuracy, cur_idx)
+        writer.add_scalar("Accuracy/dev", dev_accuracy, cur_idx)
+        writer.add_scalar("Accuracy/test", test_accuracy, cur_idx)
+        log_random_text_samples(train_df, cur_idx, "train")
+        log_random_text_samples(dev_df, cur_idx, "dev")
+        log_random_text_samples(test_df, cur_idx, "test")
+
     cur_idx += 1
-
-
-with torch.no_grad():
-    dev_df['pred'] = dev_df.apply(lambda row: eval_inflection(form_model, row), axis=1)
-    dev_df.pred = dev_df.pred.apply(decode_form_pred)
-    dev_df['pred_content'] = dev_df.apply(lambda row: eval_content(content_model, row), axis=1)
-    dev_df.pred_content = dev_df.pred_content.apply(decode_content_pred)
-    accuracy = np.sum(dev_df.pred == dev_df.form) / dev_df.shape[0]
-    print(f"Dev accuracy: {accuracy:.2%}")
-    dev_df.loc[:, ['form', 'content', 'pred', 'pred_content']].to_csv("dev_out.tsv", sep="\t")
-
-    test_df['pred'] = test_df.apply(lambda row: eval_inflection(form_model, row), axis=1)
-    test_df.pred = test_df.pred.apply(decode_form_pred)
-    test_df['pred_content'] = test_df.apply(lambda row: eval_content(content_model, row), axis=1)
-    test_df.pred_content = test_df.pred_content.apply(decode_content_pred)
-    accuracy = np.sum(test_df.pred == test_df.form) / test_df.shape[0]
-    print(f"Test accuracy: {accuracy:.2%}")
-    test_df.loc[:, ['form', 'content', 'pred', 'pred_content']].to_csv("test_out.tsv", sep="\t")
-
-    train_df['pred'] = train_df.apply(lambda row: eval_inflection(form_model, row), axis=1)
-    train_df.pred = train_df.pred.apply(decode_form_pred)
-    train_df['pred_content'] = train_df.apply(lambda row: eval_content(content_model, row), axis=1)
-    train_df.pred_content = train_df.pred_content.apply(decode_content_pred)
-    accuracy = np.sum(train_df.pred == train_df.form) / train_df.shape[0]
-    print(f"Train accuracy: {accuracy:.2%}")
-    train_df.loc[:, ['form', 'content', 'pred', 'pred_content']].to_csv("train_out.tsv", sep="\t")
