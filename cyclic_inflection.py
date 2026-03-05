@@ -31,6 +31,9 @@ root_df = pd.DataFrame(data=data)
 train_df = pd.concat([train_df, root_df], ignore_index=True)
 print("Num train rows:", train_df.shape[0])
 
+num_train_pairs = sum(train_df.root.value_counts() ** 2)
+print("Num train pairs:", num_train_pairs)
+
 form_unigram_vocab = set()
 for row in train_df.itertuples():
     form_unigram_vocab |= set(row.form)
@@ -229,84 +232,88 @@ start_vector = start_vector.unsqueeze(0)
 
 def train_step(form_model, content_model, train_df, num_examples=1, num_epochs=1, forced=True):
     losses = []
-    pbar = tqdm(total=num_examples * num_epochs)
+    train_df = train_df.sample(n=num_examples)
+    num_pairs = sum(train_df.root.value_counts() ** 2)
+    pbar = tqdm(total=num_pairs * num_epochs)
     for n in range(num_epochs):
         epoch_loss = 0
-        for row in train_df.sample(n=num_examples).itertuples():
-            pair = get_random_pair(row, train_df)
+        for row in train_df.itertuples():
+            mask = train_df.root == row.root
+            for pair in train_df[mask].itertuples():
             
-            # First content prediction
-            seqs = (row.form_sequence, pair.form_sequence)
-            maxlen = max(s.shape[0] for s in seqs)
-            vs = []
-            for s in seqs:
-                while s.shape[0] < maxlen:
-                    s = torch.cat((s, pad_vector), dim=0)
-                vs.append(s)
-            X = torch.cat(vs, dim=1)
-            expanded_content = row.content_tensor.expand(maxlen, -1)
-            X = torch.cat([X, expanded_content], dim=1)
-            pred_content = content_model(X)
-            loss = criterion(pred_content, pair.content_tensor.unsqueeze(0).to(torch.long))
+                # First content prediction
+                seqs = (row.form_sequence, pair.form_sequence)
+                maxlen = max(s.shape[0] for s in seqs)
+                vs = []
+                for s in seqs:
+                    while s.shape[0] < maxlen:
+                        s = torch.cat((s, pad_vector), dim=0)
+                    vs.append(s)
+                X = torch.cat(vs, dim=1)
+                expanded_content = row.content_tensor.expand(maxlen, -1)
+                X = torch.cat([X, expanded_content], dim=1)
+                pred_content = content_model(X)
+                loss = criterion(pred_content, pair.content_tensor.unsqueeze(0).to(torch.long))
 
-            # First form prediction
-            maxlen = row.form_sequence.shape[0]
-            if forced:
-                expanded_row_content = row.content_tensor.expand(maxlen, -1)
-                expanded_pair_content = pair.content_tensor.expand(maxlen, -1)
-                X = torch.cat([row.form_sequence, expanded_row_content, expanded_pair_content], dim=1)
-            else:
-                expanded_row_content = row.content_tensor.expand(maxlen, -1)
-                pred_content = torch.argmax(pred_content.squeeze(), dim=0)
-                expanded_pair_content = pred_content.expand(maxlen, -1)
-                X = torch.cat([row.form_sequence, expanded_row_content, expanded_pair_content], dim=1)
-            y = pair.form_sequence[:-1, :]
-            tgt_mask = nn.Transformer.generate_square_subsequent_mask(y.shape[0])
-            pred_form = form_model(X, y, tgt_mask=tgt_mask, tgt_is_causal=True)
-            actual_form = torch.argmax(pair.form_sequence[1:], axis=1)
-            loss += criterion(pred_form, actual_form)
-            
-            # Second content prediction
-            if forced:
-                seqs = (pair.form_sequence, row.form_sequence)
-            else:
-                seqs = (torch.cat((start_vector, pred_form)), row.form_sequence)
-            maxlen = max(s.shape[0] for s in seqs)
-            vs = []
-            for s in seqs:
-                while s.shape[0] < maxlen:
-                    s = torch.cat((s, pad_vector), dim=0)
-                vs.append(s)
-            X = torch.cat(vs, dim=1)
-            expanded_content = pair.content_tensor.expand(maxlen, -1)
-            X = torch.cat([X, expanded_content], dim=1)
-            pred_content = content_model(X)
-            loss += criterion(pred_content, row.content_tensor.unsqueeze(0).to(torch.long))
-            
-            # Second form prediction
-            maxlen = pair.form_sequence.shape[0]
-            if forced:
-                expanded_row_content = row.content_tensor.expand(maxlen, -1)
-                expanded_pair_content = pair.content_tensor.expand(maxlen, -1)
-                X = torch.cat([pair.form_sequence, expanded_pair_content, expanded_row_content], dim=1)
-            else:
-                expanded_pair_content = pair.content_tensor.expand(maxlen, -1)
-                pred_content = torch.argmax(pred_content.squeeze(), dim=0)
-                expanded_row_content = pred_content.expand(maxlen, -1)
-                X = torch.cat([pair.form_sequence, expanded_pair_content, expanded_row_content], dim=1)
-            y = row.form_sequence[:-1, :]
-            tgt_mask = nn.Transformer.generate_square_subsequent_mask(y.shape[0])
-            pred_form = form_model(X, y, tgt_mask=tgt_mask, tgt_is_causal=True)
-            actual_form = torch.argmax(row.form_sequence[1:], axis=1)
-            loss += criterion(pred_form, actual_form)
+                # First form prediction
+                maxlen = row.form_sequence.shape[0]
+                if forced:
+                    expanded_row_content = row.content_tensor.expand(maxlen, -1)
+                    expanded_pair_content = pair.content_tensor.expand(maxlen, -1)
+                    X = torch.cat([row.form_sequence, expanded_row_content, expanded_pair_content], dim=1)
+                else:
+                    expanded_row_content = row.content_tensor.expand(maxlen, -1)
+                    pred_content = torch.argmax(pred_content.squeeze(), dim=0)
+                    expanded_pair_content = pred_content.expand(maxlen, -1)
+                    X = torch.cat([row.form_sequence, expanded_row_content, expanded_pair_content], dim=1)
+                y = pair.form_sequence[:-1, :]
+                tgt_mask = nn.Transformer.generate_square_subsequent_mask(y.shape[0])
+                pred_form = form_model(X, y, tgt_mask=tgt_mask, tgt_is_causal=True)
+                actual_form = torch.argmax(pair.form_sequence[1:], axis=1)
+                loss += criterion(pred_form, actual_form)
+                
+                # Second content prediction
+                if forced:
+                    seqs = (pair.form_sequence, row.form_sequence)
+                else:
+                    seqs = (torch.cat((start_vector, pred_form)), row.form_sequence)
+                maxlen = max(s.shape[0] for s in seqs)
+                vs = []
+                for s in seqs:
+                    while s.shape[0] < maxlen:
+                        s = torch.cat((s, pad_vector), dim=0)
+                    vs.append(s)
+                X = torch.cat(vs, dim=1)
+                expanded_content = pair.content_tensor.expand(maxlen, -1)
+                X = torch.cat([X, expanded_content], dim=1)
+                pred_content = content_model(X)
+                loss += criterion(pred_content, row.content_tensor.unsqueeze(0).to(torch.long))
+                
+                # Second form prediction
+                maxlen = pair.form_sequence.shape[0]
+                if forced:
+                    expanded_row_content = row.content_tensor.expand(maxlen, -1)
+                    expanded_pair_content = pair.content_tensor.expand(maxlen, -1)
+                    X = torch.cat([pair.form_sequence, expanded_pair_content, expanded_row_content], dim=1)
+                else:
+                    expanded_pair_content = pair.content_tensor.expand(maxlen, -1)
+                    pred_content = torch.argmax(pred_content.squeeze(), dim=0)
+                    expanded_row_content = pred_content.expand(maxlen, -1)
+                    X = torch.cat([pair.form_sequence, expanded_pair_content, expanded_row_content], dim=1)
+                y = row.form_sequence[:-1, :]
+                tgt_mask = nn.Transformer.generate_square_subsequent_mask(y.shape[0])
+                pred_form = form_model(X, y, tgt_mask=tgt_mask, tgt_is_causal=True)
+                actual_form = torch.argmax(row.form_sequence[1:], axis=1)
+                loss += criterion(pred_form, actual_form)
 
-            epoch_loss += loss.detach().item()
-            if form_model.training:
-                loss.backward()
-                optimizer.step()
-                optimizer.zero_grad()
-            pbar.update(1)
-        losses.append(epoch_loss / num_examples)
+                epoch_loss += loss.detach().item()
+                if form_model.training:
+                    loss.backward()
+                    optimizer.step()
+                    optimizer.zero_grad()
+                pbar.update(1)
+        losses.append(epoch_loss / num_pairs)
+    pbar.close()
     return losses if num_epochs > 1 else losses[0]
 
 
