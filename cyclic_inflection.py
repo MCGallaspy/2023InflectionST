@@ -9,9 +9,12 @@ import torch.nn.functional as F
 from datetime import datetime as dt
 from tqdm import tqdm
 
-SAMPLE_RATE = 0.1
-EARLY_STOP_THRESHOLD = 20
-FORCED_PRETRAIN_EPOCHS = 50
+from torch.utils.tensorboard import SummaryWriter
+writer = SummaryWriter()
+
+SAMPLE_RATE = .01
+EARLY_STOP_THRESHOLD = 5
+FORCED_PRETRAIN_EPOCHS = 20
 
 train_df = pd.read_csv('part1/data/nav.trn', sep='\t', header=None, names=["root", "content", "form"])
 train_df = train_df.sample(frac=SAMPLE_RATE)
@@ -399,7 +402,7 @@ while True:
 
     form_model.train()
     content_model.train()
-    train_losses += train_step(
+    train_loss = train_step(
         form_model,
         content_model,
         train_df,
@@ -407,11 +410,13 @@ while True:
         num_epochs=1,
         forced=False,
     )
+    
+    writer.add_scalar("Loss/train", train_loss, cur_idx)
 
     form_model.eval()
     content_model.eval()
     with torch.no_grad():
-        dev_losses += train_step(
+        dev_loss += train_step(
             form_model,
             content_model,
             dev_df,
@@ -420,8 +425,10 @@ while True:
             forced=False,
         )
 
-    if dev_losses[-1] < best_dev:
-        best_dev = dev_losses[-1]
+    writer.add_scalar("Loss/dev", dev_loss, cur_idx)
+
+    if dev_loss < best_dev:
+        best_dev = dev_loss
         best_dev_idx = cur_idx
         print(f"Best iteration: {best_dev_idx}, dev loss = {best_dev}")
         iso_time = dt.now().isoformat()
@@ -437,9 +444,6 @@ while True:
                     'optimizer_state_dict': optimizer.state_dict(),
                     }, PATH)
     cur_idx += 1
-
-print("Training losses:", train_losses)
-print("Dev losses:", dev_losses)
 
 
 with torch.no_grad():
@@ -466,14 +470,3 @@ with torch.no_grad():
     accuracy = np.sum(train_df.pred == train_df.form) / train_df.shape[0]
     print(f"Train accuracy: {accuracy:.2%}")
     train_df.loc[:, ['form', 'content', 'pred', 'pred_content']].to_csv("train_out.tsv", sep="\t")
-
-#iso_time = dt.now().isoformat()
-#iso_time_fp = iso_time.replace(":", "_")
-#iso_time_fp = iso_time_fp.replace("-", "_")
-#PATH = f"cyclic_inflection_models.{iso_time_fp}.pt"
-#torch.save({
-#            'date': iso_time,
-#            'form_model_state_dict': form_model.state_dict(),
-#            'content_model_state_dict': form_model.state_dict(),
-#            'optimizer_state_dict': optimizer.state_dict(),
-#            }, PATH)
