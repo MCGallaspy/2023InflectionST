@@ -193,14 +193,16 @@ class ContentModel(torch.nn.Module):
         pos_encoding[:, 1::2] = torch.cos(positions_list * division_term)
         self.register_buffer('pos_encoding', pos_encoding)
 
+        start_token = torch.zeros(1, 2 * self.num_labels)
+        self.register_buffer('start_token', start_token)
+
     def forward(self, X):
         X = torch.permute(X.unsqueeze(0), dims=(0, 2, 1)) # To N, C, L
         X = self.conv1(X)
         X = self.conv2(X)
         X = torch.permute(X.squeeze(), dims=(1, 0)) # Back to L, C
         X += self.pos_encoding[:X.shape[0], :X.shape[1]]
-        y = torch.zeros(1, 2 * self.num_labels)
-        transformer_out = self.transformer(X, y, tgt_mask=None, tgt_is_causal=False)
+        transformer_out = self.transformer(X, self.start_token, tgt_mask=None, tgt_is_causal=False)
         out = transformer_out.reshape(2, self.num_labels)
         out = self.log_softmax(out)
         out = out.unsqueeze(0)
