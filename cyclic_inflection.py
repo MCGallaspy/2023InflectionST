@@ -25,7 +25,7 @@ for root in train_df.root.unique():
     data.append({
         "root": root,
         "content": "ROOT",
-        "form": root,
+        "form": "*" + root,
     })
 root_df = pd.DataFrame(data=data)
 train_df = pd.concat([train_df, root_df], ignore_index=True)
@@ -99,7 +99,7 @@ for root in dev_df.root.unique():
     data.append({
         "root": root,
         "content": "ROOT",
-        "form": root,
+        "form": "*" + root,
     })
 root_df = pd.DataFrame(data=data)
 dev_df = pd.concat([dev_df, root_df], ignore_index=True)
@@ -352,7 +352,7 @@ def train_step(form_model, content_model, train_df, num_examples=1, num_epochs=1
 
 def eval_inflection(form_model, row, device="cpu"):
     form_model.eval()
-    root_form_sequence = get_form_sequence(row.root).to(device=device)
+    root_form_sequence = get_form_sequence("*" + row.root).to(device=device)
     maxlen = root_form_sequence.shape[0]
     expanded_row_content = row.content_tensor.expand(maxlen, -1).to(device=device)
     expanded_root_content = get_content_tensor("ROOT").expand(maxlen, -1).to(device=device)
@@ -373,7 +373,7 @@ def eval_inflection(form_model, row, device="cpu"):
 def eval_content(content_model, row, device="cpu"):
     content_model.eval()
     seqs = (
-        get_form_sequence(row.root).to(device=device),
+        get_form_sequence("*" + row.root).to(device=device),
         row.form_sequence.to(device=device)
     )
     maxlen = max(s.shape[0] for s in seqs)
