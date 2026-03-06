@@ -230,7 +230,7 @@ start_vector = torch.Tensor([int(i == form_unigram_vocab[GLOSS_START]) for i in 
 start_vector = start_vector.unsqueeze(0)
 
 
-def train_step(form_model, content_model, train_df, num_examples=1, num_epochs=1, forced=True):
+def train_step(form_model, content_model, train_df, num_examples=1, num_epochs=1, forced=True, device="cpu"):
     losses = []
     train_df = train_df.sample(n=num_examples)
     num_pairs = sum(train_df.root.value_counts() ** 2)
@@ -242,7 +242,10 @@ def train_step(form_model, content_model, train_df, num_examples=1, num_epochs=1
             for pair in train_df[mask].itertuples():
             
                 # First content prediction
-                seqs = (row.form_sequence, pair.form_sequence)
+                seqs = (
+                    row.form_sequence.to(device=device),
+                    pair.form_sequence.to(device=device),
+                )
                 maxlen = max(s.shape[0] for s in seqs)
                 vs = []
                 for s in seqs:
@@ -250,31 +253,45 @@ def train_step(form_model, content_model, train_df, num_examples=1, num_epochs=1
                         s = torch.cat((s, pad_vector), dim=0)
                     vs.append(s)
                 X = torch.cat(vs, dim=1)
-                expanded_content = row.content_tensor.expand(maxlen, -1)
+                expanded_content = row.content_tensor.expand(maxlen, -1).to(device=device)
                 X = torch.cat([X, expanded_content], dim=1)
                 pred_content = content_model(X)
-                loss = criterion(pred_content, pair.content_tensor.unsqueeze(0).to(torch.long))
+                loss = criterion(
+                    pred_content,
+                    pair.content_tensor.to(device=device).unsqueeze(0).to(torch.long)
+                )
 
                 # First form prediction
                 maxlen = row.form_sequence.shape[0]
                 if forced:
                     expanded_row_content = row.content_tensor.expand(maxlen, -1)
                     expanded_pair_content = pair.content_tensor.expand(maxlen, -1)
-                    X = torch.cat([row.form_sequence, expanded_row_content, expanded_pair_content], dim=1)
+                    X = torch.cat([
+                        row.form_sequence.to(device=device),
+                        expanded_row_content.to(device=device),
+                        expanded_pair_content.to(device=device)
+                    ], dim=1)
                 else:
                     expanded_row_content = row.content_tensor.expand(maxlen, -1)
                     pred_content = torch.argmax(pred_content.squeeze(), dim=0)
                     expanded_pair_content = pred_content.expand(maxlen, -1)
-                    X = torch.cat([row.form_sequence, expanded_row_content, expanded_pair_content], dim=1)
-                y = pair.form_sequence[:-1, :]
+                    X = torch.cat([
+                        row.form_sequence.to(device=device),
+                        expanded_row_content.to(device=device),
+                        expanded_pair_content.to(device=device)
+                    ], dim=1)
+                y = pair.form_sequence[:-1, :].to(device=device)
                 tgt_mask = nn.Transformer.generate_square_subsequent_mask(y.shape[0])
                 pred_form = form_model(X, y, tgt_mask=tgt_mask, tgt_is_causal=True)
-                actual_form = torch.argmax(pair.form_sequence[1:], axis=1)
+                actual_form = torch.argmax(pair.form_sequence[1:].to(device=device), axis=1)
                 loss += criterion(pred_form, actual_form)
                 
                 # Second content prediction
                 if forced:
-                    seqs = (pair.form_sequence, row.form_sequence)
+                    seqs = (
+                        pair.form_sequence.to(device=device),
+                        row.form_sequence.to(device=device)
+                    )
                 else:
                     seqs = (torch.cat((start_vector, pred_form)), row.form_sequence)
                 maxlen = max(s.shape[0] for s in seqs)
@@ -284,26 +301,37 @@ def train_step(form_model, content_model, train_df, num_examples=1, num_epochs=1
                         s = torch.cat((s, pad_vector), dim=0)
                     vs.append(s)
                 X = torch.cat(vs, dim=1)
-                expanded_content = pair.content_tensor.expand(maxlen, -1)
+                expanded_content = pair.content_tensor.expand(maxlen, -1).to(device=device)
                 X = torch.cat([X, expanded_content], dim=1)
                 pred_content = content_model(X)
-                loss += criterion(pred_content, row.content_tensor.unsqueeze(0).to(torch.long))
+                loss += criterion(
+                    pred_content,
+                    row.content_tensor.to(device=device).unsqueeze(0).to(torch.long)
+                )
                 
                 # Second form prediction
                 maxlen = pair.form_sequence.shape[0]
                 if forced:
                     expanded_row_content = row.content_tensor.expand(maxlen, -1)
                     expanded_pair_content = pair.content_tensor.expand(maxlen, -1)
-                    X = torch.cat([pair.form_sequence, expanded_pair_content, expanded_row_content], dim=1)
+                    X = torch.cat([
+                        pair.form_sequence.to(device=device),
+                        expanded_pair_content.to(device=device),
+                        expanded_row_content.to(device=device)
+                    ], dim=1)
                 else:
                     expanded_pair_content = pair.content_tensor.expand(maxlen, -1)
                     pred_content = torch.argmax(pred_content.squeeze(), dim=0)
                     expanded_row_content = pred_content.expand(maxlen, -1)
-                    X = torch.cat([pair.form_sequence, expanded_pair_content, expanded_row_content], dim=1)
-                y = row.form_sequence[:-1, :]
+                    X = torch.cat([
+                        pair.form_sequence.to(device=device),
+                        expanded_pair_content.to(device=device),
+                        expanded_row_content.to(device=device)
+                    ], dim=1)
+                y = row.form_sequence[:-1, :].to(device=device)
                 tgt_mask = nn.Transformer.generate_square_subsequent_mask(y.shape[0])
                 pred_form = form_model(X, y, tgt_mask=tgt_mask, tgt_is_causal=True)
-                actual_form = torch.argmax(row.form_sequence[1:], axis=1)
+                actual_form = torch.argmax(row.form_sequence[1:].to(device=device), axis=1)
                 loss += criterion(pred_form, actual_form)
 
                 epoch_loss += loss.detach().item()
@@ -317,14 +345,14 @@ def train_step(form_model, content_model, train_df, num_examples=1, num_epochs=1
     return losses if num_epochs > 1 else losses[0]
 
 
-def eval_inflection(form_model, row):
+def eval_inflection(form_model, row, device="cpu"):
     form_model.eval()
-    root_form_sequence = get_form_sequence(row.root)
+    root_form_sequence = get_form_sequence(row.root).to(device=device)
     maxlen = root_form_sequence.shape[0]
-    expanded_row_content = row.content_tensor.expand(maxlen, -1)
-    expanded_root_content = get_content_tensor("ROOT").expand(maxlen, -1)
+    expanded_row_content = row.content_tensor.expand(maxlen, -1).to(device=device)
+    expanded_root_content = get_content_tensor("ROOT").expand(maxlen, -1).to(device=device)
     X = torch.cat([root_form_sequence, expanded_root_content, expanded_row_content], dim=1)
-    y = torch.zeros((1, len(form_unigram_vocab)))
+    y = torch.zeros((1, len(form_unigram_vocab))).to(device=device)
     y[0, form_unigram_vocab['GLOSS_START']] = 1
     while True:
         pred = form_model(X, y)
@@ -334,12 +362,15 @@ def eval_inflection(form_model, row):
         y = torch.concat([y, next_y], axis=0)
         if torch.argmax(y[-1, :len(form_unigram_vocab)]) == form_unigram_vocab[GLOSS_END]: break
         if y.shape[0] > 100: break
-    return y
+    return y.to(device="cpu")
 
 
-def eval_content(content_model, row):
+def eval_content(content_model, row, device="cpu"):
     content_model.eval()
-    seqs = (get_form_sequence(row.root), row.form_sequence)
+    seqs = (
+        get_form_sequence(row.root).to(device=device),
+        row.form_sequence.to(device=device)
+    )
     maxlen = max(s.shape[0] for s in seqs)
     vs = []
     for s in seqs:
@@ -347,10 +378,10 @@ def eval_content(content_model, row):
             s = torch.cat((s, pad_vector), dim=0)
         vs.append(s)
     X = torch.cat(vs, dim=1)
-    expanded_content = get_content_tensor("ROOT").expand(maxlen, -1)
+    expanded_content = get_content_tensor("ROOT").expand(maxlen, -1).to(device=device)
     X = torch.cat([X, expanded_content], dim=1)
     pred_content = content_model(X)
-    return pred_content
+    return pred_content.to(device="cpu")
 
 
 def decode_form_pred(pred):
@@ -370,6 +401,18 @@ def decode_content_pred(pred):
             results.append(c)
     return ';'.join(results)
 
+cuda = None
+cuda_available = torch.cuda.is_available()
+if cuda_available:
+    cuda = torch.device('cuda')
+    print(f"Using cuda device: {cuda}")
+    form_model = form_model.to(device=cuda)
+    content_model = content_model.to(device=cuda)
+    pad_vector = pad_vector.to(device=cuda)
+    start_vector = start_vector.to(device=cuda)
+else:
+    print("Using CPU")
+
 form_model.train()
 content_model.train()
 train_step(
@@ -379,6 +422,7 @@ train_step(
     num_examples=train_df.shape[0],
     num_epochs=FORCED_PRETRAIN_EPOCHS,
     forced=True,
+    device=cuda if cuda_available else "cpu",
 )
 
 form_model.eval()
@@ -391,30 +435,31 @@ with torch.no_grad():
         num_examples=dev_df.shape[0],
         num_epochs=1,
         forced=True,
+        device=cuda if cuda_available else "cpu",
     )
 
 def get_accuracies(epoch):
     with torch.no_grad():
         form_model.eval(), content_model.eval()
-        dev_df['pred'] = dev_df.apply(lambda row: eval_inflection(form_model, row), axis=1)
+        dev_df['pred'] = dev_df.apply(lambda row: eval_inflection(form_model, row, device=cuda if cuda_available else "cpu"), axis=1)
         dev_df.pred = dev_df.pred.apply(decode_form_pred)
-        dev_df['pred_content'] = dev_df.apply(lambda row: eval_content(content_model, row), axis=1)
+        dev_df['pred_content'] = dev_df.apply(lambda row: eval_content(content_model, row, device=cuda if cuda_available else "cpu"), axis=1)
         dev_df.pred_content = dev_df.pred_content.apply(decode_content_pred)
         dev_accuracy = np.sum(dev_df.pred == dev_df.form) / dev_df.shape[0]
         print(f"Dev accuracy: {dev_accuracy:.2%}")
         dev_df.loc[:, ['form', 'content', 'pred', 'pred_content']].to_csv(f"dev_out.epoch{epoch}.tsv", sep="\t")
 
-        test_df['pred'] = test_df.apply(lambda row: eval_inflection(form_model, row), axis=1)
+        test_df['pred'] = test_df.apply(lambda row: eval_inflection(form_model, row, device=cuda if cuda_available else "cpu"), axis=1)
         test_df.pred = test_df.pred.apply(decode_form_pred)
-        test_df['pred_content'] = test_df.apply(lambda row: eval_content(content_model, row), axis=1)
+        test_df['pred_content'] = test_df.apply(lambda row: eval_content(content_model, row, device=cuda if cuda_available else "cpu"), axis=1)
         test_df.pred_content = test_df.pred_content.apply(decode_content_pred)
         test_accuracy = np.sum(test_df.pred == test_df.form) / test_df.shape[0]
         print(f"Test accuracy: {test_accuracy:.2%}")
         test_df.loc[:, ['form', 'content', 'pred', 'pred_content']].to_csv(f"test_out.epoch{epoch}.tsv", sep="\t")
 
-        train_df['pred'] = train_df.apply(lambda row: eval_inflection(form_model, row), axis=1)
+        train_df['pred'] = train_df.apply(lambda row: eval_inflection(form_model, row, device=cuda if cuda_available else "cpu"), axis=1)
         train_df.pred = train_df.pred.apply(decode_form_pred)
-        train_df['pred_content'] = train_df.apply(lambda row: eval_content(content_model, row), axis=1)
+        train_df['pred_content'] = train_df.apply(lambda row: eval_content(content_model, row, device=cuda if cuda_available else "cpu"), axis=1)
         train_df.pred_content = train_df.pred_content.apply(decode_content_pred)
         train_accuracy = np.sum(train_df.pred == train_df.form) / train_df.shape[0]
         print(f"Train accuracy: {train_accuracy:.2%}")
@@ -447,6 +492,7 @@ while True:
         num_examples=train_df.shape[0],
         num_epochs=1,
         forced=False,
+        device=cuda if cuda_available else "cpu",
     )
     
     writer.add_scalar("Loss/train", train_loss, cur_idx)
@@ -461,6 +507,7 @@ while True:
             num_examples=dev_df.shape[0],
             num_epochs=1,
             forced=False,
+            device=cuda if cuda_available else "cpu",
         )
 
     writer.add_scalar("Loss/dev", dev_loss, cur_idx)
