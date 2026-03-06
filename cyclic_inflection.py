@@ -295,7 +295,10 @@ def train_step(form_model, content_model, train_df, num_examples=1, num_epochs=1
                         row.form_sequence.to(device=device)
                     )
                 else:
-                    seqs = (torch.cat((start_vector, pred_form)), row.form_sequence)
+                    seqs = (
+                        torch.cat((start_vector, pred_form)),
+                        row.form_sequence.to(device=device)
+                    )
                 maxlen = max(s.shape[0] for s in seqs)
                 vs = []
                 for s in seqs:
@@ -359,7 +362,7 @@ def eval_inflection(form_model, row, device="cpu"):
     while True:
         pred = form_model(X, y)
         next_y_label = torch.argmax(pred[-1, :])
-        next_y = torch.zeros((1, y.shape[1]))
+        next_y = torch.zeros((1, y.shape[1])).to(device=device)
         next_y[0, next_y_label] = 1
         y = torch.concat([y, next_y], axis=0)
         if torch.argmax(y[-1, :len(form_unigram_vocab)]) == form_unigram_vocab[GLOSS_END]: break
